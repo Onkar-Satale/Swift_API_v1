@@ -12,10 +12,33 @@ export default function BotSidebar({
 }) {
   const [input, setInput] = useState("");
   const botBodyRef = useRef(null);
+  const sidebarRef = useRef(null);
   const [showClearConfirm, setShowClearConfirm] = useState(false);
   const [expandedDetails, setExpandedDetails] = useState({});
 
   const { messages, setMessages } = useContext(SwiftAPIContext);
+
+  useEffect(() => {
+    const handleClickOutside = (event) => {
+      if (sidebarRef.current && !sidebarRef.current.contains(event.target)) {
+        if (onClose) onClose();
+      }
+    };
+
+    const handleKeyDown = (event) => {
+      if (event.key === "Escape") {
+        if (onClose) onClose();
+      }
+    };
+
+    document.addEventListener("mousedown", handleClickOutside);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", handleClickOutside);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [onClose]);
+
 
   const handleClearBot = () => {
     setMessages([
@@ -258,7 +281,7 @@ export default function BotSidebar({
 
   if (!token) {
     return (
-      <div className="bot-sidebar">
+      <div className="bot-sidebar" ref={sidebarRef}>
         <div className="bot-header">
           <div className="bot-header-left">
             <h3 style={{ color: "#ff8810", fontWeight: "bold", margin: 0, whiteSpace: "nowrap" }} className="bot-title">
@@ -305,7 +328,8 @@ export default function BotSidebar({
   }
 
   return (
-    <div className="bot-sidebar">
+    <div className="bot-sidebar" ref={sidebarRef}>
+
       {/* HEADER */}
       <div className="bot-header">
         <div className="bot-header-left">
