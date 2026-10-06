@@ -1,5 +1,4 @@
 import { ApiError } from '../utils/ApiError.js';
-import logger from '../utils/logger.js';
 
 /**
  * Global Express error handling middleware.
@@ -37,19 +36,10 @@ const errorHandler = (err, req, res, next) => {
     ...(process.env.NODE_ENV === "development" && { stack: error.stack }),
   };
 
-  const logMessage = `${error.statusCode} - ${error.message} - ${req.originalUrl} - ${req.method} - ${req.ip}`;
-  const logMeta = {
-    statusCode: error.statusCode,
-    url: req.originalUrl,
-    method: req.method,
-    ip: req.ip,
-    stack: error.stack,
-  };
-
   if (error.statusCode >= 500) {
-    logger.error(logMessage, logMeta);
+    console.error(`[ERROR ${error.statusCode}] ${req.method} ${req.originalUrl}:`, error.stack || error.message);
   } else {
-    logger.warn(logMessage, { ...logMeta, stack: undefined });
+    console.warn(`[WARN ${error.statusCode}] ${req.method} ${req.originalUrl}: ${error.message}`);
   }
 
   res.status(error.statusCode).json(response);

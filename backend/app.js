@@ -9,7 +9,6 @@ import cors from 'cors';
 import morgan from 'morgan';
 import helmet from 'helmet';
 import cookieParser from 'cookie-parser';
-import logger from './utils/logger.js';
 import errorHandler from './middlewares/errorHandlerMiddleware.js';
 import { authRateLimiter, apiRateLimiter } from './middlewares/rateLimiterMiddleware.js';
 import authRoutes from './routes/authRoute.js';
@@ -37,7 +36,7 @@ app.use(cors({
     if (!origin || allowedOrigins.includes(origin) || origin.startsWith('http://localhost') || origin.startsWith('http://127.0.0.1')) {
       callback(null, true);
     } else {
-      logger.warn(`CORS blocked this Origin: ${origin}`);
+      console.warn(`CORS blocked this Origin: ${origin}`);
       callback(new Error('CORS blocked origin'), false);
     }
   },
