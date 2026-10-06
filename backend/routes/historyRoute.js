@@ -1,5 +1,5 @@
 import express from 'express';
-import { deleteHistoryValidator } from '../validators/historyValidator.js';
+import { deleteHistoryValidator } from '../validators.js';
 import { fetchHistoryHandler, deleteHistoryHandler, clearHistoryHandler } from '../controllers/historyController.js';
 import auth from '../middlewares/authMiddleware.js';
 

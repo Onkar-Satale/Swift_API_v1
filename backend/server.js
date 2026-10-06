@@ -28,7 +28,7 @@ if (!process.env.JWT_ACCESS_SECRET || !process.env.JWT_REFRESH_SECRET) {
   throw new Error("Missing JWT environment variables");
 }
 
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT;
 
 app.listen(PORT, () => {
   console.log(`🚀 Server proudly serving requests on port ${PORT}`);

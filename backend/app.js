@@ -15,7 +15,7 @@ import authRoutes from './routes/authRoute.js';
 import historyRoutes from './routes/historyRoute.js';
 import aiRoutes from './routes/aiRoute.js';
 import { proxyRequestHandler } from './controllers/requestController.js';
-import { requestProxyValidator } from './validators/requestValidator.js';
+import { requestProxyValidator } from './validators.js';
 import auth from './middlewares/authMiddleware.js';
 import sanitizeMiddleware from './middlewares/sanitizeMiddleware.js';
 

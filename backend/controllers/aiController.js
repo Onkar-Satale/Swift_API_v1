@@ -1,6 +1,6 @@
 import axios from 'axios';
 import { ApiError } from '../utils/ApiError.js';
-import historyService from '../services/historyService.js';
+import { pushResolutionEpisode } from './historyController.js';
 
 const genaiUrl = process.env.GENAI_SERVICE_URL;
 const genaiApiSecret = process.env.GENAI_API_SECRET;
@@ -82,8 +82,9 @@ export const indexEpisodeHandler = async (req, res, next) => {
 
     // 2. Persist in MongoDB User collection if user is authenticated
     if (req.userId) {
-      await historyService.pushResolutionEpisode(req.userId, episodeData);
+      await pushResolutionEpisode(req.userId, episodeData);
     }
+
 
     res.json({
       success: true,

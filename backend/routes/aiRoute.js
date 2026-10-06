@@ -5,7 +5,8 @@ import {
   compareValidator,
   indexEpisodeValidator,
   retrieveEpisodesValidator
-} from '../validators/aiValidator.js';
+} from '../validators.js';
+
 import {
   botHandler,
   failureAssistHandler,
