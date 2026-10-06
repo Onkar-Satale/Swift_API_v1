@@ -965,7 +965,19 @@ export default function SwiftAPIClient() {
             ) : (
               <>
                 <div style={{ display: viewMode === "raw" ? "block" : "none" }}>
-                  <pre style={{ whiteSpace: "pre-wrap", wordBreak: "break-word", margin: 0, padding: "10px" }}>
+                  <pre
+                    className="raw-response-text"
+                    style={{
+                      whiteSpace: "pre-wrap",
+                      wordBreak: "break-word",
+                      margin: 0,
+                      padding: "10px",
+                      color: "var(--terminal-green, #22c55e)",
+                      fontFamily: "var(--terminal-font, monospace)",
+                      fontSize: "13px",
+                      lineHeight: "1.5"
+                    }}
+                  >
                     {(() => {
                       const str = typeof response === "string" ? response : JSON.stringify(response);
                       return str.length > 250000 ? str.slice(0, 250000) + "\n\n... [Truncated for performance]" : str;

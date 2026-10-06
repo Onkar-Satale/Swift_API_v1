@@ -384,6 +384,17 @@ body {
   font-family: var(--terminal-font);
 }
 
+.raw-response-text,
+.response pre.raw-response-text,
+.response-body pre.raw-response-text {
+  color: var(--terminal-green, #22c55e) !important;
+  font-family: var(--terminal-font, 'JetBrains Mono', 'Fira Code', monospace);
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 /* Neutral Tool Copy button */
 .copy-btn {
   background-color: rgba(255, 255, 255, 0.04);
