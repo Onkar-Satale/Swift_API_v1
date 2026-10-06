@@ -13,7 +13,7 @@ export default function BotSidebar({
   const [input, setInput] = useState("");
   const botBodyRef = useRef(null);
   const [showClearConfirm, setShowClearConfirm] = useState(false);
-  const [expandedRag, setExpandedRag] = useState({});
+  const [expandedDetails, setExpandedDetails] = useState({});
 
   const { messages, setMessages } = useContext(SwiftAPIContext);
 
@@ -356,83 +356,40 @@ export default function BotSidebar({
             )}
 
             {/* V2 STRUCTURED FAILURE ASSISTANT MESSAGE */}
-            {msg.from === "bot" && msg.type === "failure_assist" && msg.diagnosis && (
-              <div className="failure-assist-container">
-                <div className="failure-alert-banner">
-                  <span className="alert-bolt">⚡</span>
-                  <div>
-                    <h4 className="failure-heading">Failure Detected ({msg.status || 500})</h4>
-                    <p className="failure-subtext">
-                      {msg.diagnosis.why || msg.diagnosis.whatHappened || msg.diagnosis.rootCause?.probableCause || "Request failed with an error."}
-                    </p>
-                  </div>
-                </div>
+            {msg.from === "bot" && msg.type === "failure_assist" && msg.diagnosis && (() => {
+              const isRag = Array.isArray(msg.retrievedEpisodes) && msg.retrievedEpisodes.length > 0;
+              const matchPct = isRag ? (msg.retrievedEpisodes[0]?.matchPercentage || 95) : null;
+              const layer = msg.diagnosis.rootCause?.predictedLayer;
+              const isExpanded = !!expandedDetails[i];
+              const cleanSnippet = msg.diagnosis.autoFix ? getCleanSnippet(msg.diagnosis.autoFix) : null;
 
-                {/* Compact RAG Pill / Details */}
-                {msg.retrievedEpisodes && msg.retrievedEpisodes.length > 0 && (
-                  <div className="rag-compact-wrapper">
-                    <button 
-                      type="button"
-                      className="rag-compact-pill"
-                      onClick={() => setExpandedRag(prev => ({ ...prev, [i]: !prev[i] }))}
-                    >
-                      <span>🏛️ RAG: {msg.retrievedEpisodes.length} historical precedent(s) verified ({msg.retrievedEpisodes[0]?.matchPercentage || 100}% match)</span>
-                      <span className="rag-expand-arrow">{expandedRag[i] ? "▲" : "▼"}</span>
-                    </button>
-
-                    {expandedRag[i] && (
-                      <div className="rag-expanded-list">
-                        {msg.retrievedEpisodes.map((ep, epIdx) => (
-                          <div key={epIdx} className="rag-episode-card-mini">
-                            <div className="rag-mini-top">
-                              <span className="rag-sim-pill">🎯 {ep.matchPercentage || 90}% Match</span>
-                              <span className="rag-endpoint-name">📌 {ep.endpoint}</span>
-                            </div>
-                            <div className="rag-mini-outcome">
-                              ✅ Outcome: Succeeded (Status {ep.resultStatus || 200})
-                            </div>
-                          </div>
-                        ))}
+              return (
+                <div className="failure-assist-container">
+                  {/* 1. At-a-glance Alert Header */}
+                  <div className="failure-alert-banner">
+                    <span className="alert-bolt">⚡</span>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div className="failure-badge-row">
+                        <span className="failure-status-badge">HTTP {msg.status || 500}</span>
+                        {layer && <span className="failure-layer-badge">{layer}</span>}
+                        {isRag ? (
+                          <span className="failure-source-badge rag" title="Proven fix from RAG historical memory">
+                            🏛️ RAG Precedent ({matchPct}%)
+                          </span>
+                        ) : (
+                          <span className="failure-source-badge llm" title="Fresh diagnostic prediction from LLM">
+                            🤖 AI Diagnosis
+                          </span>
+                        )}
                       </div>
-                    )}
-                  </div>
-                )}
-
-                {/* Root Cause Analysis (if present) */}
-                {msg.diagnosis.rootCause && (
-                  <div className="root-cause-box">
-                    <div className="root-cause-header">
-                      <span className="root-cause-layer-badge">
-                        🔍 Layer: {msg.diagnosis.rootCause.predictedLayer || "General"}
-                      </span>
-                      {msg.diagnosis.rootCause.confidence && (
-                        <span className="root-cause-confidence">
-                          {msg.diagnosis.rootCause.confidence}% confidence
-                        </span>
-                      )}
+                      <p className="failure-subtext">
+                        {msg.diagnosis.why || msg.diagnosis.whatHappened || "Request failed with an error."}
+                      </p>
                     </div>
-                    {msg.diagnosis.rootCause.probableCause && (
-                      <div className="root-cause-text">
-                        <strong>Cause:</strong> {msg.diagnosis.rootCause.probableCause}
-                      </div>
-                    )}
                   </div>
-                )}
 
-                {/* Recommended Action Steps */}
-                {msg.diagnosis.whatToDo && msg.diagnosis.whatToDo.length > 0 && (
-                  <div className="what-to-do-box">
-                    <span className="what-to-do-title">📋 Recommended Actions & Next Steps:</span>
-                    {msg.diagnosis.whatToDo.map((step, sIdx) => (
-                      <div key={sIdx} className="what-step">• {step}</div>
-                    ))}
-                  </div>
-                )}
-
-                {/* Suggested Fix / Code Snippet Preview with Clean Copy Button */}
-                {msg.diagnosis.autoFix && (msg.diagnosis.autoFix.diff || msg.diagnosis.autoFix.title || msg.diagnosis.autoFix.description) && (() => {
-                  const cleanSnippet = getCleanSnippet(msg.diagnosis.autoFix);
-                  return (
+                  {/* 2. Hero Fix Box */}
+                  {msg.diagnosis.autoFix && (msg.diagnosis.autoFix.title || cleanSnippet) && (
                     <div className="suggested-fix-box">
                       <div className="suggested-fix-header">
                         <div className="suggested-fix-title-wrap">
@@ -450,11 +407,11 @@ export default function BotSidebar({
                             className="btn-copy-snippet"
                             onClick={() => {
                               navigator.clipboard.writeText(cleanSnippet);
-                              showToast("📋 Clean payload snippet copied!");
+                              showToast("📋 Clean snippet copied!");
                             }}
                             title="Copy clean snippet to clipboard"
                           >
-                            📋 Copy Snippet
+                            📋 Copy
                           </button>
                         )}
                       </div>
@@ -465,10 +422,68 @@ export default function BotSidebar({
                         </div>
                       )}
                     </div>
-                  );
-                })()}
-              </div>
-            )}
+                  )}
+
+                  {/* 3. Progressive Disclosure: Collapsible Deep Analysis */}
+                  {(msg.diagnosis.rootCause?.probableCause || (msg.diagnosis.whatToDo && msg.diagnosis.whatToDo.length > 0) || isRag) && (
+                    <div className="failure-accordion-wrapper">
+                      <button
+                        type="button"
+                        className="failure-accordion-toggle"
+                        onClick={() => setExpandedDetails(prev => ({ ...prev, [i]: !prev[i] }))}
+                      >
+                        <span>{isExpanded ? "▲ Hide Deep Analysis" : "▼ Deep Analysis & Debug Steps"}</span>
+                        <span className="failure-accordion-hint">
+                          {isExpanded ? "Less" : `${(msg.diagnosis.whatToDo?.length || 0) + (isRag ? 1 : 0)} details`}
+                        </span>
+                      </button>
+
+                      {isExpanded && (
+                        <div className="failure-accordion-body">
+                          {msg.diagnosis.rootCause && (
+                            <div className="accordion-section">
+                              <div className="accordion-section-title">
+                                🔍 Root Cause {msg.diagnosis.rootCause.confidence ? `(${msg.diagnosis.rootCause.confidence}% confidence)` : ""}
+                              </div>
+                              <div className="accordion-section-text">
+                                {msg.diagnosis.rootCause.probableCause || msg.diagnosis.whatHappened}
+                              </div>
+                            </div>
+                          )}
+
+                          {msg.diagnosis.whatToDo && msg.diagnosis.whatToDo.length > 0 && (
+                            <div className="accordion-section">
+                              <div className="accordion-section-title">📋 Recommended Debug Steps</div>
+                              <div className="accordion-steps-list">
+                                {msg.diagnosis.whatToDo.map((step, sIdx) => (
+                                  <div key={sIdx} className="accordion-step">• {step}</div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+
+                          {isRag && (
+                            <div className="accordion-section">
+                              <div className="accordion-section-title">🏛️ Verified Precedents ({msg.retrievedEpisodes.length})</div>
+                              <div className="accordion-rag-list">
+                                {msg.retrievedEpisodes.map((ep, epIdx) => (
+                                  <div key={epIdx} className="accordion-rag-item">
+                                    <span className="accordion-rag-match">🎯 {ep.matchPercentage || 90}% match</span>
+                                    <span className="accordion-rag-endpoint">📌 {ep.endpoint}</span>
+                                    <span className="accordion-rag-outcome">Resolved to Status {ep.resultStatus || 200}</span>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
+
 
             {/* BOT MESSAGE (STRING OR FALLBACK OBJECT) */}
             {msg.from === "bot" && msg.type !== "failure_assist" && (

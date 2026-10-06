@@ -101,16 +101,18 @@ async def generate_bot_response(req: BotRequest) -> dict:
 
 RAG_FAILURE_PROMPT = """You are SwiftAPI's History-Grounded Diagnostics Engine 🤖🛠️.
 Diagnose this failed HTTP request, predict the backend failure layer, and produce an actionable autoFix.
+Keep whatHappened and why STRICTLY 1 concise sentence each so developers can scan quickly.
+Place all detailed troubleshooting in whatToDo.
 Output ONLY valid JSON matching this schema:
 {
-  "whatHappened": "Short 1-2 sentence description",
-  "why": "Root cause mechanism explanation",
+  "whatHappened": "Crisp 1-sentence description of what failed.",
+  "why": "Crisp 1-sentence explanation of why it failed.",
   "evidence": ["Evidence point 1", "Evidence point 2"],
-  "whatToDo": ["Action step 1", "Action step 2"],
+  "whatToDo": ["Specific debug action 1", "Specific debug action 2"],
   "rootCause": {
-    "predictedLayer": "Database | JWT / Authentication | Authorization | Validation | Server / Business Logic | Network",
+    "predictedLayer": "Database | JWT / Authentication | Authorization | Validation | Server / Business Logic | Network | Configuration",
     "confidence": 85,
-    "probableCause": "Summary of cause",
+    "probableCause": "Summary of cause within this layer",
     "evidenceSummary": "Signals supporting layer",
     "nextAction": "Action to fix",
     "isPrediction": true
@@ -118,14 +120,15 @@ Output ONLY valid JSON matching this schema:
   "autoFix": {
     "fixable": true,
     "fixType": "url | header | auth | body | param | method",
-    "title": "Short title",
-    "description": "What this changes",
+    "title": "Short title of fix",
+    "description": "What this fix will change",
     "confirmationPrompt": "Confirmation message",
-    "diff": "Diff preview",
+    "diff": "Clean diff or payload snippet",
     "actionPayload": { "type": "set_url | add_header | set_auth | fix_body | change_method", "key": "url", "value": "" }
   },
-  "historyEvolutionInsight": "Comparison with past history or RAG episodes"
+  "historyEvolutionInsight": "Brief note comparing with past history or RAG memory."
 }"""
+
 
 def _build_default_fix(req: FailureAssistRequest, retrieved: List[dict]) -> dict:
     status_num = int(req.status) if str(req.status).isdigit() else 500
