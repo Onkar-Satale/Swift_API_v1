@@ -101,12 +101,18 @@ async def generate_bot_response(req: BotRequest) -> dict:
 
 RAG_FAILURE_PROMPT = """You are SwiftAPI's History-Grounded Diagnostics Engine 🤖🛠️.
 Diagnose this failed HTTP request, predict the backend failure layer, and produce an actionable autoFix.
+
+HISTORY COMPARISON (CRITICAL):
+Look closely at "Relevant Past Session Attempts". If a previous attempt succeeded (status 200) with a slightly different URL, path, or parameter (e.g. username typo 'Onkar-Satal' vs proven 'Onkar-Satale'):
+- In "why": Explicitly state the typo/difference in 1 sentence citing the past successful test (e.g. "URL path has a typo: past successful test used 'Onkar-Satale' instead of 'Onkar-Satal'.").
+- In "autoFix": Immediately generate the fix pointing to that proven URL.
+
 Keep whatHappened and why STRICTLY 1 concise sentence each so developers can scan quickly.
 Place all detailed troubleshooting in whatToDo.
 Output ONLY valid JSON matching this schema:
 {
   "whatHappened": "Crisp 1-sentence description of what failed.",
-  "why": "Crisp 1-sentence explanation of why it failed.",
+  "why": "Crisp 1-sentence explanation of why it failed (citing past successful test if available).",
   "evidence": ["Evidence point 1", "Evidence point 2"],
   "whatToDo": ["Specific debug action 1", "Specific debug action 2"],
   "rootCause": {
@@ -133,6 +139,18 @@ Output ONLY valid JSON matching this schema:
 def _build_default_fix(req: FailureAssistRequest, retrieved: List[dict]) -> dict:
     status_num = int(req.status) if str(req.status).isdigit() else 500
     url = req.url or ""
+
+    # Check if a past attempt succeeded on a similar endpoint
+    if req.previousAttempts:
+        for att in req.previousAttempts:
+            att_url = att.get("url") or ""
+            if str(att.get("status", "")).startswith("2") and att_url and att_url != url:
+                return {
+                    "fixable": True, "fixType": "url", "title": "Use Proven URL from History",
+                    "description": f"In past testing, '{att_url}' succeeded with 200 OK.",
+                    "confirmationPrompt": f"Update URL to '{att_url}'?", "diff": f"- {url}\n+ {att_url}",
+                    "actionPayload": {"type": "set_url", "key": "url", "value": att_url}
+                }
 
     dec_match = re.search(r"\/(\d+)\.\d+", url)
     if dec_match:
@@ -197,11 +215,24 @@ async def generate_failure_diagnosis(req: FailureAssistRequest) -> dict:
         for ep in retrieved
     ]) if retrieved else "No previous episodes found."
 
+    session_history_str = ""
+    past_good_url = None
+    if req.previousAttempts:
+        lines = []
+        for att in req.previousAttempts:
+            att_url = att.get("url") or ""
+            att_status = att.get("status")
+            lines.append(f"- URL: {att_url} | Status: {att_status} | Method: {att.get('method')}")
+            if str(att_status).startswith("2") and att_url and att_url != req.url:
+                past_good_url = att_url
+        session_history_str = "\nRelevant Past Session Attempts:\n" + "\n".join(lines)
+
     user_prompt = f"""Failed Request:
 Method: {req.method} | URL: {req.url} | Status: {req.status} | Duration: {req.duration}ms
 Headers: {json.dumps(req.headers or {})}
 Body: {json.dumps(req.body) if req.body else 'None'}
 Response: {json.dumps(req.response) if isinstance(req.response, (dict, list)) else str(req.response or '')[:300]}
+{session_history_str}
 RAG Evidence: {rag_context}"""
 
     try:
@@ -224,6 +255,23 @@ RAG Evidence: {rag_context}"""
                 }
             }
 
+        # If a past test on this host succeeded, ensure it's adopted if fix is missing or generic
+        if past_good_url:
+            fix_payload = diag.get("autoFix", {}).get("actionPayload", {})
+            fix_val = fix_payload.get("value") or ""
+            if not diag.get("autoFix") or not fix_payload or fix_val == req.url:
+                diag["autoFix"] = {
+                    "fixable": True,
+                    "fixType": "url",
+                    "title": "Use Proven URL from History",
+                    "description": f"In past testing, '{past_good_url}' succeeded with 200 OK.",
+                    "confirmationPrompt": f"Update URL to '{past_good_url}'?",
+                    "diff": f"- {req.url}\n+ {past_good_url}",
+                    "actionPayload": {"type": "set_url", "key": "url", "value": past_good_url}
+                }
+            if past_good_url not in diag.get("why", ""):
+                diag["why"] = f"In past testing, '{past_good_url}' succeeded (200 OK). Current URL has a typo."
+
         if not diag.get("autoFix") or not diag["autoFix"].get("actionPayload"):
             diag["autoFix"] = _build_default_fix(req, retrieved)
 
@@ -243,6 +291,7 @@ RAG Evidence: {rag_context}"""
             },
             "retrievedEpisodes": retrieved
         }
+
 
 
 # ============================================================================

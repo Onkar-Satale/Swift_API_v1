@@ -319,19 +319,22 @@ export default function SwiftAPIClient() {
     try {
       setShowBot(true);
 
-      const previousAttempts = history
-        .filter((h) => {
-          try {
-            const u1 = new URL(h.url);
-            const u2 = new URL(url);
-            const clean1 = u1.pathname.toLowerCase().replace(/[^a-z0-9]/g, "");
-            const clean2 = u2.pathname.toLowerCase().replace(/[^a-z0-9]/g, "");
-            return u1.host === u2.host && (clean1.includes(clean2.slice(0, 4)) || clean2.includes(clean1.slice(0, 4)));
-          } catch {
-            return h.url?.includes(url.slice(0, 15)) || false;
-          }
-        })
-        .slice(0, 5);
+      const hostHistory = (history || []).filter((h) => {
+        try {
+          const u1 = new URL(h.url);
+          const u2 = new URL(url);
+          return u1.host === u2.host;
+        } catch {
+          return h.url && url && h.url.includes(url.slice(0, 15));
+        }
+      });
+
+      // Prioritize past successful tests so AI immediately detects typos against known working URLs
+      const previousAttempts = [
+        ...hostHistory.filter((h) => String(h.status).startsWith("2")),
+        ...hostHistory.filter((h) => !String(h.status).startsWith("2"))
+      ].slice(0, 5);
+
 
       const backendUrl = process.env.REACT_APP_BACKEND_URL;
       const token = localStorage.getItem("authToken");
