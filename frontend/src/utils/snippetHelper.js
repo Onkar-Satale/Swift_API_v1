@@ -22,6 +22,8 @@ export function getCleanSnippet(autoFix) {
         return str;
       }
     }
+  }
+
   if (autoFix.actionPayload && autoFix.actionPayload.token) {
     return `Authorization: Bearer ${autoFix.actionPayload.token}`;
   }
