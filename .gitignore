@@ -49,3 +49,9 @@ chroma_db/
 *.sqlite3
 # Custom / Temporary Documentation
 paper.txt
+
+# Editor / IDE settings
+.vscode/
+.idea/
+*.swp
+*.swo
