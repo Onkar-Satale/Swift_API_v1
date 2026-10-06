@@ -14,11 +14,9 @@ from app.services.rag_service import rag_memory_store
 groq_client = AsyncGroq(api_key=settings.GROQ_API_KEY)
 
 ACTIVE_MODELS = [
-    "llama-3.1-8b-instant",
-    "llama3-8b-8192",
     "qwen/qwen3.8-27b",
-    "groq/compound",
-    "openai/gpt-oss-120b"
+    "openai/gpt-oss-120b",
+    "openai/gpt-oss-20b"
 ]
 
 async def call_groq_with_fallback(
@@ -95,29 +93,93 @@ async def generate_bot_response(req: BotRequest) -> dict:
         return {"type": "bot_response", "text": "❌ An error occurred while generating a response. Please try again."}
 
 
+import difflib
+from urllib.parse import urlparse
+
 # ============================================================================
 # 🔹 Failure Diagnosis & Auto-Fix
 # ============================================================================
 
-RAG_FAILURE_PROMPT = """You are SwiftAPI's History-Grounded Diagnostics Engine 🤖🛠️.
-Diagnose this failed HTTP request, predict the backend failure layer, and produce an actionable autoFix.
+def is_similar_url_typo(current_url: str, past_url: str) -> bool:
+    """
+    Returns True ONLY if current_url and past_url are on the same host,
+    share the same route segment count, and differ by a slight typo (similarity > 0.72)
+    in exactly one non-numeric segment.
+    """
+    if not current_url or not past_url or current_url.strip() == past_url.strip():
+        return False
+    try:
+        p1 = urlparse(current_url)
+        p2 = urlparse(past_url)
+        if p1.netloc.lower() != p2.netloc.lower():
+            return False
 
-HISTORY COMPARISON (CRITICAL):
-Look closely at "Relevant Past Session Attempts". If a previous attempt succeeded (status 200) with a slightly different URL, path, or parameter (e.g. username typo 'Onkar-Satal' vs proven 'Onkar-Satale'):
-- In "why": Explicitly state the typo/difference in 1 sentence citing the past successful test (e.g. "URL path has a typo: past successful test used 'Onkar-Satale' instead of 'Onkar-Satal'.").
-- In "autoFix": Immediately generate the fix pointing to that proven URL.
+        s1 = [s for s in p1.path.strip("/").split("/") if s]
+        s2 = [s for s in p2.path.strip("/").split("/") if s]
+        if len(s1) != len(s2) or len(s1) == 0:
+            return False
 
-Keep whatHappened and why STRICTLY 1 concise sentence each so developers can scan quickly.
-Place all detailed troubleshooting in whatToDo.
+        diff_count = 0
+        for seg1, seg2 in zip(s1, s2):
+            if seg1 != seg2:
+                if seg1.isdigit() and seg2.isdigit():
+                    return False
+                diff_count += 1
+                ratio = difflib.SequenceMatcher(None, seg1.lower(), seg2.lower()).ratio()
+                if ratio < 0.72:
+                    return False
+
+        return diff_count == 1
+    except Exception:
+        return False
+
+
+RAG_FAILURE_PROMPT = """You are SwiftAPI's Intelligent Diagnostics Engine 🤖🛠️.
+Analyze the failed HTTP request using ALL provided context: HTTP method, URL, status code, response body, error messages/stack traces, headers, session history, and RAG evidence.
+
+DIAGNOSTIC ACCURACY RULES:
+1. Root Cause Classification:
+   - 401 Unauthorized / TokenExpiredError / invalid token / missing token:
+     * Layer: "JWT / Authentication"
+     * why: Explain the exact token/authentication failure (e.g., "The JWT token in the Authorization header has expired." or "Authorization token is missing or invalid.").
+     * autoFix: fixType "auth", title "Provide Valid Bearer Token", actionPayload {"type": "set_auth", "authType": "bearer", "requiresUserInput": true, "userInputPrompt": "Enter valid Bearer Token or re-login"}.
+     * NEVER suggest URL changes or claim a URL typo for 401 / Auth errors!
+   - 403 Forbidden:
+     * Layer: "Authorization"
+     * User is authenticated but lacks required role or permissions.
+   - 404 Not Found:
+     * Layer: "Server / Business Logic" or "Validation"
+     * Check URL path. If "Relevant Past Session Attempts" shows a past 200 OK request on the SAME endpoint with a minor typo in the URL (e.g. 'Onkar-Satal' vs proven 'Onkar-Satale'), identify the typo and set autoFix to that proven URL.
+     * If there is no typo, state that the route/resource does not exist on the server.
+   - 400 / 422 Bad Request:
+     * Layer: "Validation"
+     * Missing or malformed payload fields, invalid types, or constraint violations.
+   - 500 / 502 / 503 / 504:
+     * Layer: "Server / Business Logic" or "Database" or "Network"
+     * Unhandled exception, database error, or downstream service failure. Cite the stack trace if present.
+
+2. Brevity & Style:
+   - "whatHappened": Exactly 1 concise, direct sentence describing the failure.
+   - "why": Exactly 1 concise, direct sentence stating the EXACT reason based on the response error and context.
+   - "evidence": 2 to 3 short bullet points from the response message, stack trace, status, or headers.
+   - "whatToDo": 2 to 3 specific, actionable steps to resolve the failure.
+
+3. Auto-Fix (MANDATORY):
+   - "autoFix" must correspond directly to the root cause:
+     * Auth: fixType "auth", title "Configure Bearer Token", actionPayload {"type": "set_auth", "authType": "bearer", "requiresUserInput": true, "userInputPrompt": "Enter Bearer Token"}
+     * URL typo: fixType "url", title "Correct URL Typo", actionPayload {"type": "set_url", "key": "url", "value": "<corrected_url>"}
+     * Header: fixType "header", title "Add Missing Header", actionPayload {"type": "add_header", "key": "<Header-Name>", "value": "<Header-Value>"}
+     * Body: fixType "body", title "Correct Request Body", actionPayload {"type": "fix_body", "value": <corrected_json>}
+
 Output ONLY valid JSON matching this schema:
 {
   "whatHappened": "Crisp 1-sentence description of what failed.",
-  "why": "Crisp 1-sentence explanation of why it failed (citing past successful test if available).",
+  "why": "Crisp 1-sentence explanation of the exact reason why it failed.",
   "evidence": ["Evidence point 1", "Evidence point 2"],
   "whatToDo": ["Specific debug action 1", "Specific debug action 2"],
   "rootCause": {
     "predictedLayer": "Database | JWT / Authentication | Authorization | Validation | Server / Business Logic | Network | Configuration",
-    "confidence": 85,
+    "confidence": 95,
     "probableCause": "Summary of cause within this layer",
     "evidenceSummary": "Signals supporting layer",
     "nextAction": "Action to fix",
@@ -139,47 +201,53 @@ Output ONLY valid JSON matching this schema:
 def _build_default_fix(req: FailureAssistRequest, retrieved: List[dict]) -> dict:
     status_num = int(req.status) if str(req.status).isdigit() else 500
     url = req.url or ""
+    resp_text = str(req.response or "").lower()
 
-    # Check if a past attempt succeeded on a similar endpoint
-    if req.previousAttempts:
+    # 1. Auth errors (401, or mentions token / expired / unauthorized)
+    if status_num == 401 or "token" in resp_text or "unauthorized" in resp_text or "jwt" in resp_text:
+        return {
+            "fixable": True,
+            "fixType": "auth",
+            "title": "Configure Bearer Token",
+            "description": "Provide a valid Authorization Bearer token or re-authenticate via login.",
+            "confirmationPrompt": "Configure Authorization header?",
+            "diff": "+ Authorization: Bearer <valid_token>",
+            "actionPayload": {
+                "type": "set_auth",
+                "authType": "bearer",
+                "requiresUserInput": True,
+                "userInputPrompt": "Enter Bearer Token"
+            }
+        }
+
+    # 2. Check if a past attempt succeeded on a similar endpoint with a typo (404 ONLY)
+    if status_num == 404 and req.previousAttempts:
         for att in req.previousAttempts:
             att_url = att.get("url") or ""
-            if str(att.get("status", "")).startswith("2") and att_url and att_url != url:
+            if str(att.get("status", "")).startswith("2") and is_similar_url_typo(url, att_url):
                 return {
-                    "fixable": True, "fixType": "url", "title": "Use Proven URL from History",
+                    "fixable": True,
+                    "fixType": "url",
+                    "title": "Correct URL Typo",
                     "description": f"In past testing, '{att_url}' succeeded with 200 OK.",
-                    "confirmationPrompt": f"Update URL to '{att_url}'?", "diff": f"- {url}\n+ {att_url}",
+                    "confirmationPrompt": f"Update URL to '{att_url}'?",
+                    "diff": f"- {url}\n+ {att_url}",
                     "actionPayload": {"type": "set_url", "key": "url", "value": att_url}
                 }
 
+    # 3. Check for decimal ID in URL
     dec_match = re.search(r"\/(\d+)\.\d+", url)
     if dec_match:
         fixed_url = re.sub(r"\/(\d+)\.\d+", r"/\1", url)
         return {
             "fixable": True, "fixType": "url", "title": "Correct Resource ID to Integer",
             "description": f"Convert decimal ID in URL to integer ({dec_match.group(1)})",
-            "confirmationPrompt": f"Update URL to '{fixed_url}'?", "diff": f"- {url}\n+ {fixed_url}",
+            "confirmationPrompt": f"Update URL to '{fixed_url}'?",
+            "diff": f"- {url}\n+ {fixed_url}",
             "actionPayload": {"type": "set_url", "key": "url", "value": fixed_url}
         }
 
-    if retrieved and retrieved[0].get("successfulFixUsed"):
-        rf = retrieved[0]["successfulFixUsed"]
-        return {
-            "fixable": True, "fixType": rf.get("fixType", "url"),
-            "title": rf.get("title", "Apply Verified Historical Fix"),
-            "description": rf.get("description", "Apply proven fix from RAG memory"),
-            "confirmationPrompt": "Apply proven fix from history?", "diff": rf.get("diff", "+ Applied from past run"),
-            "actionPayload": rf.get("actionPayload", {"type": "set_url", "key": "url", "value": url})
-        }
-
-    if status_num == 401:
-        return {
-            "fixable": True, "fixType": "auth", "title": "Configure Bearer Token",
-            "description": "Add Authorization Bearer token to request headers.",
-            "confirmationPrompt": "Configure Authorization token?", "diff": "+ Authorization: Bearer <token>",
-            "actionPayload": {"type": "set_auth", "authType": "bearer", "requiresUserInput": True, "userInputPrompt": "Enter Bearer Token"}
-        }
-
+    # 4. Known common 404 typos
     if status_num == 404:
         for typo, fix in [("commentss", "comments"), ("postss", "posts"), ("todoss", "todos")]:
             if typo in url:
@@ -187,15 +255,33 @@ def _build_default_fix(req: FailureAssistRequest, retrieved: List[dict]) -> dict
                 return {
                     "fixable": True, "fixType": "url", "title": "Correct URL Typo",
                     "description": f"Fixed trailing typo in endpoint path: {fix}",
-                    "confirmationPrompt": f"Update URL to '{fixed_url}'?", "diff": f"- {url}\n+ {fixed_url}",
+                    "confirmationPrompt": f"Update URL to '{fixed_url}'?",
+                    "diff": f"- {url}\n+ {fixed_url}",
                     "actionPayload": {"type": "set_url", "key": "url", "value": fixed_url}
                 }
 
+    # 5. RAG match if available and status matches
+    if retrieved and retrieved[0].get("successfulFixUsed"):
+        rf = retrieved[0]["successfulFixUsed"]
+        if str(retrieved[0].get("failedStatus")) == str(req.status):
+            return {
+                "fixable": True,
+                "fixType": rf.get("fixType", "header"),
+                "title": rf.get("title", "Apply Verified Historical Fix"),
+                "description": rf.get("description", "Apply proven fix from RAG memory"),
+                "confirmationPrompt": "Apply proven fix from history?",
+                "diff": rf.get("diff", "+ Applied from past run"),
+                "actionPayload": rf.get("actionPayload", {"type": "add_header", "key": "Authorization", "value": "Bearer <token>"})
+            }
+
     return {
-        "fixable": True, "fixType": "url", "title": "Review Request Parameters",
-        "description": "Check headers, parameters, and endpoint configuration.",
-        "confirmationPrompt": "Inspect current request configuration?", "diff": f"Target: {url}",
-        "actionPayload": {"type": "set_url", "key": "url", "value": url}
+        "fixable": False,
+        "fixType": "header",
+        "title": "Review Request Parameters",
+        "description": "Inspect headers, parameters, and payload configuration.",
+        "confirmationPrompt": "Inspect current request configuration?",
+        "diff": f"Target: {url}",
+        "actionPayload": {"type": "inspect", "key": "url", "value": url}
     }
 
 
@@ -216,29 +302,43 @@ async def generate_failure_diagnosis(req: FailureAssistRequest) -> dict:
     ]) if retrieved else "No previous episodes found."
 
     session_history_str = ""
-    past_good_url = None
+    candidate_typo_url = None
     if req.previousAttempts:
         lines = []
         for att in req.previousAttempts:
             att_url = att.get("url") or ""
             att_status = att.get("status")
             lines.append(f"- URL: {att_url} | Status: {att_status} | Method: {att.get('method')}")
-            if str(att_status).startswith("2") and att_url and att_url != req.url:
-                past_good_url = att_url
+            # Check for candidate typo ONLY on 404
+            if (
+                str(req.status) == "404"
+                and str(att_status).startswith("2")
+                and is_similar_url_typo(req.url, att_url)
+            ):
+                candidate_typo_url = att_url
         session_history_str = "\nRelevant Past Session Attempts:\n" + "\n".join(lines)
 
-    user_prompt = f"""Failed Request:
-Method: {req.method} | URL: {req.url} | Status: {req.status} | Duration: {req.duration}ms
+    resp_str = json.dumps(req.response) if isinstance(req.response, (dict, list)) else str(req.response or "")
+    if len(resp_str) > 1200:
+        resp_str = resp_str[:1200] + "... [truncated]"
+
+    user_prompt = f"""Failed Request Details:
+Method: {req.method}
+URL: {req.url}
+HTTP Status: {req.status}
+Duration: {req.duration}ms
 Headers: {json.dumps(req.headers or {})}
 Body: {json.dumps(req.body) if req.body else 'None'}
-Response: {json.dumps(req.response) if isinstance(req.response, (dict, list)) else str(req.response or '')[:300]}
+Response Body / Stack Trace:
+{resp_str}
 {session_history_str}
-RAG Evidence: {rag_context}"""
+RAG Retrieved Precedents:
+{rag_context}"""
 
     try:
         content = await call_groq_with_fallback(
             [{"role": "system", "content": RAG_FAILURE_PROMPT}, {"role": "user", "content": user_prompt}],
-            temperature=0.2, max_tokens=550, is_json=True
+            temperature=0.2, max_tokens=600, is_json=True
         )
         diag = extract_json_from_llm(content)
         if not diag or "whatHappened" not in diag:
@@ -255,22 +355,35 @@ RAG Evidence: {rag_context}"""
                 }
             }
 
-        # If a past test on this host succeeded, ensure it's adopted if fix is missing or generic
-        if past_good_url:
-            fix_payload = diag.get("autoFix", {}).get("actionPayload", {})
-            fix_val = fix_payload.get("value") or ""
-            if not diag.get("autoFix") or not fix_payload or fix_val == req.url:
+        # Check for 404 verified typo in history
+        if candidate_typo_url and str(req.status) == "404":
+            if not diag.get("autoFix") or diag.get("autoFix", {}).get("fixType") != "url":
                 diag["autoFix"] = {
                     "fixable": True,
                     "fixType": "url",
                     "title": "Use Proven URL from History",
-                    "description": f"In past testing, '{past_good_url}' succeeded with 200 OK.",
-                    "confirmationPrompt": f"Update URL to '{past_good_url}'?",
-                    "diff": f"- {req.url}\n+ {past_good_url}",
-                    "actionPayload": {"type": "set_url", "key": "url", "value": past_good_url}
+                    "description": f"In past testing, '{candidate_typo_url}' succeeded with 200 OK.",
+                    "confirmationPrompt": f"Update URL to '{candidate_typo_url}'?",
+                    "diff": f"- {req.url}\n+ {candidate_typo_url}",
+                    "actionPayload": {"type": "set_url", "key": "url", "value": candidate_typo_url}
                 }
-            if past_good_url not in diag.get("why", ""):
-                diag["why"] = f"In past testing, '{past_good_url}' succeeded (200 OK). Current URL has a typo."
+            if candidate_typo_url not in diag.get("why", ""):
+                diag["why"] = f"In past testing, '{candidate_typo_url}' succeeded (200 OK). Current URL has a typo."
+
+        # Guardrails for Auth (401 / Token / Unauthorized) errors:
+        # Never allow URL typo fixes for auth failures!
+        is_auth_error = (
+            str(req.status) == "401"
+            or "token" in resp_str.lower()
+            or "jwt" in resp_str.lower()
+            or "unauthorized" in resp_str.lower()
+        )
+        if is_auth_error:
+            if diag.get("rootCause"):
+                diag["rootCause"]["predictedLayer"] = "JWT / Authentication"
+            current_fix = diag.get("autoFix")
+            if not current_fix or current_fix.get("fixType") == "url" or not current_fix.get("actionPayload"):
+                diag["autoFix"] = _build_default_fix(req, retrieved)
 
         if not diag.get("autoFix") or not diag["autoFix"].get("actionPayload"):
             diag["autoFix"] = _build_default_fix(req, retrieved)

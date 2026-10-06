@@ -22,11 +22,18 @@ export function getCleanSnippet(autoFix) {
         return str;
       }
     }
+  if (autoFix.actionPayload && autoFix.actionPayload.token) {
+    return `Authorization: Bearer ${autoFix.actionPayload.token}`;
   }
 
   // 2. Parse diff string
   const diff = autoFix.diff || autoFix.suggestedSnippet;
-  if (!diff || typeof diff !== "string") return "";
+  if (!diff || typeof diff !== "string") {
+    if (autoFix.fixType === "auth") {
+      return "Authorization: Bearer <token>";
+    }
+    return "";
+  }
 
   const lines = diff.split("\n");
 

@@ -381,7 +381,11 @@ export default function BotSidebar({
 
             {/* V2 STRUCTURED FAILURE ASSISTANT MESSAGE */}
             {msg.from === "bot" && msg.type === "failure_assist" && msg.diagnosis && (() => {
-              const isRag = Array.isArray(msg.retrievedEpisodes) && msg.retrievedEpisodes.length > 0;
+              const isRag =
+                Array.isArray(msg.retrievedEpisodes) &&
+                msg.retrievedEpisodes.length > 0 &&
+                String(msg.retrievedEpisodes[0]?.failedStatus) === String(msg.status) &&
+                (msg.retrievedEpisodes[0]?.matchPercentage || 0) >= 60;
               const matchPct = isRag ? (msg.retrievedEpisodes[0]?.matchPercentage || 95) : null;
               const layer = msg.diagnosis.rootCause?.predictedLayer;
               const isExpanded = !!expandedDetails[i];
