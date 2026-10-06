@@ -1,8 +1,6 @@
 """
-Groq LLM Integration Service
-Manages system prompts, dynamic user prompt generation per feature,
-async calls to Groq with model fallback (qwen/qwen3.8-27b, groq/compound, openai/gpt-oss-120b),
-History-Grounded RAG retrieval, Root Cause Prediction, History Comparison, and API Health Scoring.
+Groq LLM Service
+Handles chat completions, RAG-grounded failure diagnostics & auto-fix, and execution comparisons.
 """
 
 import json
@@ -10,19 +8,11 @@ import re
 from typing import Dict, Any, List
 from groq import AsyncGroq
 from app.config.settings import settings, logger
-from app.schemas.request import (
-    BotRequest,
-    FailureAssistRequest,
-    CompareRequest,
-    IndexEpisodeRequest,
-    RetrieveEpisodesRequest
-)
+from app.schemas.request import BotRequest, FailureAssistRequest, CompareRequest
 from app.services.rag_service import rag_memory_store
 
-# Shared Groq async client instance
 groq_client = AsyncGroq(api_key=settings.GROQ_API_KEY)
 
-# Supported active Groq models in prioritized order for minimum latency
 ACTIVE_MODELS = [
     "llama-3.1-8b-instant",
     "llama3-8b-8192",
@@ -37,206 +27,28 @@ async def call_groq_with_fallback(
     max_tokens: int = 500,
     is_json: bool = False
 ) -> str:
-    """
-    Executes high-speed chat completion with Groq using automatic fallback across active models.
-    """
+    """Executes chat completion with Groq using automatic fallback models."""
     last_err = None
-    for model_name in ACTIVE_MODELS:
+    for model in ACTIVE_MODELS:
         try:
             kwargs = {
-                "model": model_name,
+                "model": model,
                 "messages": messages,
                 "temperature": temperature,
-                "max_tokens": max_tokens,
+                "max_tokens": max_tokens
             }
             if is_json:
                 kwargs["response_format"] = {"type": "json_object"}
-
             res = await groq_client.chat.completions.create(**kwargs)
             content = res.choices[0].message.content
             if content and content.strip():
                 return content
         except Exception as e:
-            logger.warning(f"Groq call with model '{model_name}' failed: {e}. Trying next fallback...")
+            logger.warning(f"Groq model {model} failed: {e}. Trying fallback...")
             last_err = e
-            continue
 
-    raise last_err or RuntimeError("All Groq model fallbacks failed.")
+    raise last_err or RuntimeError("All Groq models failed.")
 
-BOT_SYSTEM_PROMPT = """
-You are J.A.R.V.I.S. 🤖 — an expert API Testing and Backend Development assistant.
-
-Your purpose is to help developers understand, test, debug, and build APIs. Your explanations should be beginner-friendly while remaining technically accurate.
-
-==================================================
-PRIMARY ROLE
-==================================================
-
-You ONLY assist with topics related to:
-
-• API Testing
-• REST APIs
-• HTTP Protocol
-• HTTP Methods (GET, POST, PUT, PATCH, DELETE, etc.)
-• Headers
-• Query Parameters
-• Path Parameters
-• Request Body
-• Response Body
-• JSON
-• XML
-• Authentication (JWT, OAuth, API Keys, Bearer Tokens)
-• Cookies
-• Sessions
-• CORS
-• Status Codes
-• Backend Development
-• Express.js
-• Node.js
-• Python APIs
-• FastAPI
-• Flask
-• Django REST
-• Spring Boot APIs
-• ASP.NET APIs
-• API Security
-• Validation
-• Error Handling
-• API Design
-• Swift API
-• cURL
-• fetch()
-• Axios
-• Python requests
-• API Documentation
-• API Debugging
-• Request/Response Structures
-
-If a question is outside these topics, politely refuse.
-
-Never answer unrelated questions.
-
-==================================================
-TONE
-==================================================
-
-Be:
-• Friendly
-• Supportive
-• Encouraging
-• Professional
-• Patient
-
-Teach like you're helping a junior developer.
-Use emojis naturally but sparingly.
-
-==================================================
-RESPONSE STYLE
-==================================================
-
-Keep responses concise.
-Default length: 2–6 short paragraphs. Use simple English.
-"""
-
-async def generate_bot_response(req: BotRequest) -> dict:
-    context_str = ""
-
-    if req.currentApiContext:
-        ctx = req.currentApiContext
-        context_str = (
-            f"\n\nCurrent API Context Details:\n"
-            f"- Method: {ctx.get('method', 'N/A')}\n"
-            f"- URL: {ctx.get('url', 'N/A')}\n"
-            f"- Status Code: {ctx.get('status', 'N/A')}\n"
-            f"- Headers: {ctx.get('headers', 'N/A')}\n"
-            f"- Request Body: {ctx.get('body', 'N/A')}\n"
-            f"- Response Body: {ctx.get('response', 'N/A')}\n"
-        )
-
-    user_content = f"User Message: {req.message}{context_str}"
-    messages = [{"role": "system", "content": BOT_SYSTEM_PROMPT}]
-
-    if req.requestHistory:
-        for msg in req.requestHistory:
-            from_user = msg.get("from")
-            text = msg.get("text") or ""
-            if text and ("Hi 👋" not in text and "API assistant" not in text):
-                role = "user" if from_user == "user" else "assistant"
-                messages.append({"role": role, "content": text})
-
-    messages.append({"role": "user", "content": user_content})
-
-    try:
-        explanation = await call_groq_with_fallback(
-            messages=messages,
-            temperature=0.5,
-            max_tokens=500
-        )
-
-        return {
-            "type": "bot_response",
-            "text": explanation
-        }
-    except Exception as e:
-        logger.error(f"Groq API Chat Bot Error: {str(e)}", exc_info=True)
-        return {
-            "type": "bot_response",
-            "text": "❌ An error occurred while generating a response. Please try again."
-        }
-
-
-# ============================================================================
-# 🔹 V2: HISTORY-GROUNDED RAG FAILURE ASSISTANT & AUTO-FIX
-# ============================================================================
-
-RAG_FAILURE_SYSTEM_PROMPT = """You are SwiftAPI's History-Grounded Diagnostics & Failure Engine 🤖🛠️.
-Your role is to diagnose failed HTTP requests (4xx, 5xx, or network errors), predict the backend failure layer, and produce an actionable auto-fix grounded in real historical evidence retrieved via RAG.
-
-GROUNDING & EVIDENCE RULES:
-1. Review the "RETRIEVED HISTORICAL EPISODES (RAG)" section. If matching episodes exist, cite the precedent and adopt the proven fix.
-2. NEVER fabricate dates or timestamps. Only reference real retrieved episodes.
-
-AUTO-FIX MANDATORY RULE:
-You MUST ALWAYS generate an actionable autoFix object with `"fixable": true` for EVERY failure:
-- If URL has a typo or invalid format (e.g. decimal ID /posts/20.5 -> /posts/20, or /commentss -> /comments): set "fixType": "url", "actionPayload": {"type": "set_url", "key": "url", "value": "<corrected_url>"}.
-- If 401 Unauthorized: set "fixType": "auth", "actionPayload": {"type": "set_auth", "authType": "bearer", "requiresUserInput": true, "userInputPrompt": "Enter Bearer Token"}.
-- If 405 Method Not Allowed: set "fixType": "method", "actionPayload": {"type": "change_method", "value": "GET"}.
-- If 400 Bad Request / Invalid Body: set "fixType": "body", "actionPayload": {"type": "fix_body", "value": "{}"}.
-- If Missing Header: set "fixType": "header", "actionPayload": {"type": "add_header", "key": "Content-Type", "value": "application/json"}.
-
-You MUST output ONLY valid JSON matching this exact structure (NO markdown codeblocks, NO extra text):
-{
-  "whatHappened": "Clear, concise 1-2 sentence description of the failure.",
-  "why": "Explanation of the root cause mechanism.",
-  "evidence": ["Evidence point 1 from status/headers/body", "Evidence point 2"],
-  "whatToDo": ["Action step 1", "Action step 2"],
-  "rootCause": {
-    "predictedLayer": "Database | JWT / Authentication | Authorization | Validation | Server / Business Logic | External Service | Network | Configuration",
-    "confidence": 85,
-    "probableCause": "Concise summary of the probable cause within this backend layer",
-    "evidenceSummary": "Specific signals supporting this layer prediction",
-    "nextAction": "Recommended backend or client action to resolve",
-    "isPrediction": true
-  },
-  "autoFix": {
-    "fixable": true,
-    "fixType": "url | header | auth | body | param | method",
-    "title": "Short title of fix (e.g. Correct URL Route or Add Authorization Header)",
-    "description": "What this fix will change in the request",
-    "confirmationPrompt": "Should I update the URL to the correct endpoint?",
-    "diff": "Clean, pasteable snippet (e.g. exact JSON payload string, clean URL, or clean header) without confusing '- Body: None' prefixes",
-    "actionPayload": {
-      "type": "set_url | add_header | update_header | set_auth | fix_body | set_param | change_method",
-      "key": "url",
-      "value": "https://example.com/correct",
-      "requiresUserInput": false,
-      "userInputPrompt": "",
-      "userInputDefault": ""
-    }
-  },
-  "historyEvolutionInsight": "Explanation of how this attempt compares with past history or retrieved RAG episodes."
-}
-"""
 
 def extract_json_from_llm(raw_text: str) -> dict:
     cleaned = raw_text.strip()
@@ -252,358 +64,230 @@ def extract_json_from_llm(raw_text: str) -> dict:
                 return json.loads(match.group(1))
             except Exception:
                 pass
-        return {}
+    return {}
+
+
+# ============================================================================
+# 🔹 Bot Response
+# ============================================================================
+
+BOT_SYSTEM_PROMPT = """You are J.A.R.V.I.S. 🤖 — an expert API Testing and Backend Development assistant for SwiftAPI.
+Assist with REST APIs, HTTP methods, headers, parameters, authentication (JWT, OAuth, Bearer), status codes, JSON/XML, and backend debugging.
+Keep responses concise, friendly, beginner-friendly (2-4 short paragraphs), and technically accurate. Use emojis sparingly."""
+
+async def generate_bot_response(req: BotRequest) -> dict:
+    ctx = req.currentApiContext or {}
+    ctx_str = f"\nAPI Context: {ctx.get('method', '')} {ctx.get('url', '')} Status: {ctx.get('status', '')}" if ctx else ""
+    messages = [{"role": "system", "content": BOT_SYSTEM_PROMPT}]
+
+    for msg in (req.requestHistory or []):
+        text = msg.get("text", "")
+        if text and "Hi 👋" not in text:
+            messages.append({"role": "user" if msg.get("from") == "user" else "assistant", "content": text})
+
+    messages.append({"role": "user", "content": f"{req.message}{ctx_str}"})
+
+    try:
+        reply = await call_groq_with_fallback(messages, temperature=0.5, max_tokens=500)
+        return {"type": "bot_response", "text": reply}
+    except Exception as e:
+        logger.error(f"Bot error: {e}")
+        return {"type": "bot_response", "text": "❌ An error occurred while generating a response. Please try again."}
+
+
+# ============================================================================
+# 🔹 Failure Diagnosis & Auto-Fix
+# ============================================================================
+
+RAG_FAILURE_PROMPT = """You are SwiftAPI's History-Grounded Diagnostics Engine 🤖🛠️.
+Diagnose this failed HTTP request, predict the backend failure layer, and produce an actionable autoFix.
+Output ONLY valid JSON matching this schema:
+{
+  "whatHappened": "Short 1-2 sentence description",
+  "why": "Root cause mechanism explanation",
+  "evidence": ["Evidence point 1", "Evidence point 2"],
+  "whatToDo": ["Action step 1", "Action step 2"],
+  "rootCause": {
+    "predictedLayer": "Database | JWT / Authentication | Authorization | Validation | Server / Business Logic | Network",
+    "confidence": 85,
+    "probableCause": "Summary of cause",
+    "evidenceSummary": "Signals supporting layer",
+    "nextAction": "Action to fix",
+    "isPrediction": true
+  },
+  "autoFix": {
+    "fixable": true,
+    "fixType": "url | header | auth | body | param | method",
+    "title": "Short title",
+    "description": "What this changes",
+    "confirmationPrompt": "Confirmation message",
+    "diff": "Diff preview",
+    "actionPayload": { "type": "set_url | add_header | set_auth | fix_body | change_method", "key": "url", "value": "" }
+  },
+  "historyEvolutionInsight": "Comparison with past history or RAG episodes"
+}"""
+
+def _build_default_fix(req: FailureAssistRequest, retrieved: List[dict]) -> dict:
+    status_num = int(req.status) if str(req.status).isdigit() else 500
+    url = req.url or ""
+
+    dec_match = re.search(r"\/(\d+)\.\d+", url)
+    if dec_match:
+        fixed_url = re.sub(r"\/(\d+)\.\d+", r"/\1", url)
+        return {
+            "fixable": True, "fixType": "url", "title": "Correct Resource ID to Integer",
+            "description": f"Convert decimal ID in URL to integer ({dec_match.group(1)})",
+            "confirmationPrompt": f"Update URL to '{fixed_url}'?", "diff": f"- {url}\n+ {fixed_url}",
+            "actionPayload": {"type": "set_url", "key": "url", "value": fixed_url}
+        }
+
+    if retrieved and retrieved[0].get("successfulFixUsed"):
+        rf = retrieved[0]["successfulFixUsed"]
+        return {
+            "fixable": True, "fixType": rf.get("fixType", "url"),
+            "title": rf.get("title", "Apply Verified Historical Fix"),
+            "description": rf.get("description", "Apply proven fix from RAG memory"),
+            "confirmationPrompt": "Apply proven fix from history?", "diff": rf.get("diff", "+ Applied from past run"),
+            "actionPayload": rf.get("actionPayload", {"type": "set_url", "key": "url", "value": url})
+        }
+
+    if status_num == 401:
+        return {
+            "fixable": True, "fixType": "auth", "title": "Configure Bearer Token",
+            "description": "Add Authorization Bearer token to request headers.",
+            "confirmationPrompt": "Configure Authorization token?", "diff": "+ Authorization: Bearer <token>",
+            "actionPayload": {"type": "set_auth", "authType": "bearer", "requiresUserInput": True, "userInputPrompt": "Enter Bearer Token"}
+        }
+
+    if status_num == 404:
+        for typo, fix in [("commentss", "comments"), ("postss", "posts"), ("todoss", "todos")]:
+            if typo in url:
+                fixed_url = url.replace(typo, fix)
+                return {
+                    "fixable": True, "fixType": "url", "title": "Correct URL Typo",
+                    "description": f"Fixed trailing typo in endpoint path: {fix}",
+                    "confirmationPrompt": f"Update URL to '{fixed_url}'?", "diff": f"- {url}\n+ {fixed_url}",
+                    "actionPayload": {"type": "set_url", "key": "url", "value": fixed_url}
+                }
+
+    return {
+        "fixable": True, "fixType": "url", "title": "Review Request Parameters",
+        "description": "Check headers, parameters, and endpoint configuration.",
+        "confirmationPrompt": "Inspect current request configuration?", "diff": f"Target: {url}",
+        "actionPayload": {"type": "set_url", "key": "url", "value": url}
+    }
+
 
 async def generate_failure_diagnosis(req: FailureAssistRequest) -> dict:
-    """
-    Executes automated failure diagnosis grounded with RAG-retrieved historical episodes.
-    """
-    # 1. RAG Vector Retrieval: Retrieve top-k matching historical episodes
-    error_str = str(req.response or "")
-    headers_keys = list(req.headers.keys()) if isinstance(req.headers, dict) else []
-    
-    retrieved_episodes = rag_memory_store.retrieve_relevant_episodes(
+    retrieved = rag_memory_store.retrieve_relevant_episodes(
         user_id=req.userId or "guest",
         method=req.method,
         url=req.url,
         status=req.status,
-        error_text=error_str,
-        headers_keys=headers_keys,
+        error_text=str(req.response or "")[:200],
+        headers_keys=list(req.headers.keys()) if isinstance(req.headers, dict) else [],
         top_k=2
     )
 
-    rag_context_str = ""
-    if retrieved_episodes:
-        rag_context_str = "\n=== RETRIEVED HISTORICAL EPISODES (RAG MEMORY) ===\n"
-        for idx, ep in enumerate(retrieved_episodes):
-            rag_context_str += (
-                f"Episode #{idx+1} (Match Score: {ep['matchPercentage']}% | Timestamp: {ep['timestamp']}):\n"
-                f"- Endpoint: {ep['endpoint']}\n"
-                f"- Failed Status: {ep['failedStatus']} | Previous Error: {ep['previousError']}\n"
-                f"- Root Cause Layer: {ep['rootCauseLayer']}\n"
-                f"- Verified Successful Fix Used: {json.dumps(ep['successfulFixUsed'])}\n"
-                f"- Resolved To: Status {ep['resultStatus']} in {ep.get('resultDuration', 0)}ms\n\n"
-            )
-    else:
-        rag_context_str = "\n=== RETRIEVED HISTORICAL EPISODES (RAG MEMORY) ===\nNo prior matching failure episodes found in memory for this endpoint pattern.\n"
+    rag_context = "\n".join([
+        f"Episode: {ep['endpoint']} -> {ep['failedStatus']} (Layer: {ep['rootCauseLayer']}) Fix: {json.dumps(ep['successfulFixUsed'])}"
+        for ep in retrieved
+    ]) if retrieved else "No previous episodes found."
 
-    # Add previous attempts from active session
-    prev_attempts_str = ""
-    if req.previousAttempts and len(req.previousAttempts) > 0:
-        prev_attempts_str = f"\nRecent Active Session Attempts:\n"
-        for idx, att in enumerate(req.previousAttempts[-3:]):
-            prev_attempts_str += f"Attempt {idx+1}: Status {att.get('status')} | Duration {att.get('duration')}ms | Time {att.get('time')}\n"
-
-    user_prompt = f"""
-Diagnose this failed API request using the grounded RAG history:
-
-CURRENT FAILED REQUEST:
-Method: {req.method}
-URL: {req.url}
+    user_prompt = f"""Failed Request:
+Method: {req.method} | URL: {req.url} | Status: {req.status} | Duration: {req.duration}ms
 Headers: {json.dumps(req.headers or {})}
-Params: {json.dumps(req.params or {})}
 Body: {json.dumps(req.body) if req.body else 'None'}
-Status Code: {req.status}
-Duration: {req.duration}ms
-Response Body: {json.dumps(req.response) if isinstance(req.response, (dict, list)) else str(req.response or '')}
-{prev_attempts_str}
-{rag_context_str}
-"""
+Response: {json.dumps(req.response) if isinstance(req.response, (dict, list)) else str(req.response or '')[:300]}
+RAG Evidence: {rag_context}"""
 
     try:
         content = await call_groq_with_fallback(
-            messages=[
-                {"role": "system", "content": RAG_FAILURE_SYSTEM_PROMPT},
-                {"role": "user", "content": user_prompt}
-            ],
-            temperature=0.2,
-            max_tokens=550,
-            is_json=True
+            [{"role": "system", "content": RAG_FAILURE_PROMPT}, {"role": "user", "content": user_prompt}],
+            temperature=0.2, max_tokens=550, is_json=True
         )
-        diagnosis_data = extract_json_from_llm(content)
-
-        if not diagnosis_data or "whatHappened" not in diagnosis_data:
-            status_num = int(req.status) if str(req.status).isdigit() else 500
-            layer = "JWT / Authentication" if status_num == 401 else ("Authorization" if status_num == 403 else ("Validation" if status_num == 400 else "Server / Business Logic"))
-            
-            diagnosis_data = {
-                "whatHappened": f"The request failed with status {req.status}.",
-                "why": f"The target server rejected the request in the {layer} layer.",
-                "evidence": [f"Status code: {req.status}", f"Target URL: {req.url}"],
-                "whatToDo": ["Review headers and authentication parameters."],
+        diag = extract_json_from_llm(content)
+        if not diag or "whatHappened" not in diag:
+            diag = {
+                "whatHappened": f"Request failed with status {req.status}.",
+                "why": "Target server rejected the request.",
+                "evidence": [f"Status code {req.status}"],
+                "whatToDo": ["Check request headers, URL, and payload."],
                 "rootCause": {
-                    "predictedLayer": layer,
-                    "confidence": 85,
-                    "probableCause": f"Status {req.status} indicates an issue in the {layer} layer.",
-                    "evidenceSummary": f"HTTP status code {req.status}",
-                    "nextAction": "Review headers and authentication parameters.",
+                    "predictedLayer": "Server / Business Logic", "confidence": 80,
+                    "probableCause": f"Status {req.status} response from server.",
+                    "evidenceSummary": f"HTTP {req.status}", "nextAction": "Review request.",
                     "isPrediction": True
                 }
             }
 
-        # Ensure autoFix is ALWAYS populated and actionable
-        auto_fix = diagnosis_data.get("autoFix")
-        if not auto_fix or not auto_fix.get("fixable") or not auto_fix.get("actionPayload"):
-            status_num = int(req.status) if str(req.status).isdigit() else 500
-            url_str = req.url or ""
-            decimal_match = re.search(r"\/(\d+)\.\d+", url_str)
+        if not diag.get("autoFix") or not diag["autoFix"].get("actionPayload"):
+            diag["autoFix"] = _build_default_fix(req, retrieved)
 
-            if decimal_match:
-                corrected_url = re.sub(r"\/(\d+)\.\d+", r"/\1", url_str)
-                diagnosis_data["autoFix"] = {
-                    "fixable": True,
-                    "fixType": "url",
-                    "title": "Correct Resource ID to Integer",
-                    "description": f"Convert decimal ID in URL to valid integer ({decimal_match.group(1)})",
-                    "confirmationPrompt": f"Should I update the URL to '{corrected_url}'?",
-                    "diff": f"- {url_str}\n+ {corrected_url}",
-                    "actionPayload": {
-                        "type": "set_url",
-                        "key": "url",
-                        "value": corrected_url
-                    }
-                }
-            elif retrieved_episodes and retrieved_episodes[0].get("successfulFixUsed"):
-                rec_fix = retrieved_episodes[0]["successfulFixUsed"]
-                act_payload = rec_fix.get("actionPayload") or {}
-                diagnosis_data["autoFix"] = {
-                    "fixable": True,
-                    "fixType": rec_fix.get("fixType") or act_payload.get("type", "url"),
-                    "title": rec_fix.get("title") or "Apply Verified Historical Fix",
-                    "description": rec_fix.get("description") or "Apply proven fix retrieved from RAG memory.",
-                    "confirmationPrompt": "Should I apply the proven fix from history?",
-                    "diff": rec_fix.get("diff") or f"+ Fix applied from past run",
-                    "actionPayload": act_payload or {
-                        "type": "set_url",
-                        "key": "url",
-                        "value": act_payload.get("value", url_str)
-                    }
-                }
-            elif status_num == 401:
-                diagnosis_data["autoFix"] = {
-                    "fixable": True,
-                    "fixType": "auth",
-                    "title": "Configure Bearer Token",
-                    "description": "Add Authorization Bearer token to authorize this request.",
-                    "confirmationPrompt": "Should I configure Authorization for you?",
-                    "diff": "+ Authorization: Bearer <token>",
-                    "actionPayload": {
-                        "type": "set_auth",
-                        "authType": "bearer",
-                        "requiresUserInput": True,
-                        "userInputPrompt": "Enter Bearer Token",
-                        "userInputDefault": ""
-                    }
-                }
-            elif status_num == 404 and ("commentss" in url_str or "postss" in url_str or "todoss" in url_str):
-                corrected_url = url_str.replace("commentss", "comments").replace("postss", "posts").replace("todoss", "todos")
-                diagnosis_data["autoFix"] = {
-                    "fixable": True,
-                    "fixType": "url",
-                    "title": "Correct URL Route Typo",
-                    "description": "Fixed trailing plural typo in endpoint URL path.",
-                    "confirmationPrompt": f"Should I update the URL to '{corrected_url}'?",
-                    "diff": f"- {url_str}\n+ {corrected_url}",
-                    "actionPayload": {
-                        "type": "set_url",
-                        "key": "url",
-                        "value": corrected_url
-                    }
-                }
-            else:
-                next_act = diagnosis_data.get("rootCause", {}).get("nextAction") or "Review request parameters."
-                diagnosis_data["autoFix"] = {
-                    "fixable": True,
-                    "fixType": "url",
-                    "title": "Apply Suggested Configuration Fix",
-                    "description": next_act,
-                    "confirmationPrompt": "Should I apply this fix to the workspace?",
-                    "diff": f"Action: {next_act}",
-                    "actionPayload": {
-                        "type": "set_url",
-                        "key": "url",
-                        "value": url_str
-                    }
-                }
-
-        return {
-            "success": True,
-            "diagnosis": diagnosis_data,
-            "retrievedEpisodes": retrieved_episodes
-        }
+        return {"success": True, "diagnosis": diag, "retrievedEpisodes": retrieved}
 
     except Exception as e:
-        logger.error(f"Error generating failure diagnosis: {str(e)}", exc_info=True)
+        logger.error(f"Diagnosis error: {e}")
         return {
-            "success": False,
-            "error": str(e),
+            "success": False, "error": str(e),
             "diagnosis": {
                 "whatHappened": f"Request failed with status {req.status}.",
-                "why": "Unable to connect with AI diagnostics service.",
-                "evidence": [f"Status code {req.status}"],
-                "whatToDo": ["Inspect headers and body parameters manually."],
-                "rootCause": {
-                    "predictedLayer": "Server / Business Logic",
-                    "confidence": 70,
-                    "probableCause": "Backend error response received.",
-                    "evidenceSummary": f"Status: {req.status}",
-                    "nextAction": "Check API logs.",
-                    "isPrediction": True
-                },
-                "autoFix": {
-                    "fixable": False,
-                    "title": "Manual Review Needed",
-                    "description": "Please review the request configuration."
-                }
+                "why": "AI diagnostics encountered an error.",
+                "evidence": [f"Status: {req.status}"],
+                "whatToDo": ["Check request manually."],
+                "rootCause": {"predictedLayer": "Server / Business Logic", "confidence": 70, "probableCause": "Backend error.", "evidenceSummary": f"Status: {req.status}", "nextAction": "Review logs.", "isPrediction": True},
+                "autoFix": _build_default_fix(req, retrieved)
             },
-            "retrievedEpisodes": retrieved_episodes
+            "retrievedEpisodes": retrieved
         }
 
 
 # ============================================================================
-# 🔹 V2: HISTORY-AWARE COMPARISON & API HEALTH SCORE
+# 🔹 History Comparison
 # ============================================================================
 
-COMPARE_SYSTEM_PROMPT = """You are SwiftAPI's History-Aware Comparison Engine 🤖⚖️.
-Your role is to compare two execution attempts (Attempt A vs Attempt B) of an API request, identify every key difference, and explain WHY the outcome changed.
-
-You MUST return ONLY valid JSON:
+COMPARE_SYSTEM_PROMPT = """Compare two API attempts (Attempt A vs B). Return ONLY valid JSON:
 {
-  "statusComparison": {
-    "attemptAStatus": "401",
-    "attemptBStatus": "200",
-    "statusChanged": true,
-    "summary": "Outcome improved from 401 Unauthorized to 200 OK."
-  },
-  "timingComparison": {
-    "attemptADuration": 450,
-    "attemptBDuration": 120,
-    "differenceMs": -330,
-    "insight": "Attempt B was 330ms faster."
-  },
-  "detectedChanges": [
-    {
-      "field": "Headers / Authorization",
-      "attemptA": "Missing",
-      "attemptB": "Bearer token included",
-      "impact": "Crucial: Provided required authentication."
-    }
-  ],
-  "aiExplanation": "Clear, developer-friendly 2-3 paragraph explanation of why the two attempts had different results."
-}
-"""
+  "statusComparison": { "attemptAStatus": "401", "attemptBStatus": "200", "statusChanged": true, "summary": "" },
+  "timingComparison": { "attemptADuration": 400, "attemptBDuration": 100, "differenceMs": -300, "insight": "" },
+  "detectedChanges": [{ "field": "", "attemptA": "", "attemptB": "", "impact": "" }],
+  "aiExplanation": "Clear summary explaining why the outcome changed."
+}"""
 
-def truncate_val_for_prompt(val, max_len=400):
-    if val is None:
-        return "None"
-    if isinstance(val, list):
-        if len(val) > 2:
-            return f"[{len(val)} items, sample: {json.dumps(val[0])[:150]}...]"
-        return json.dumps(val)[:max_len]
-    if isinstance(val, dict):
-        dumped = json.dumps(val)
-        return dumped[:max_len] + ("..." if len(dumped) > max_len else "")
-    s = str(val)
-    return s[:max_len] + ("..." if len(s) > max_len else "")
-
-async def generate_history_comparison(req: CompareRequest) -> dict:
-    user_prompt = f"""
-Compare these two API execution attempts:
-
---- ATTEMPT A ---
-Method: {req.attemptA.get('method')}
-URL: {req.attemptA.get('url')}
-Status: {req.attemptA.get('status')}
-Duration: {req.attemptA.get('duration')}ms
-Headers: {truncate_val_for_prompt(req.attemptA.get('headers', {}))}
-Params: {truncate_val_for_prompt(req.attemptA.get('params', {}))}
-Body: {truncate_val_for_prompt(req.attemptA.get('body', {}))}
-Response: {truncate_val_for_prompt(req.attemptA.get('response'))}
-
---- ATTEMPT B ---
-Method: {req.attemptB.get('method')}
-URL: {req.attemptB.get('url')}
-Status: {req.attemptB.get('status')}
-Duration: {req.attemptB.get('duration')}ms
-Headers: {truncate_val_for_prompt(req.attemptB.get('headers', {}))}
-Params: {truncate_val_for_prompt(req.attemptB.get('params', {}))}
-Body: {truncate_val_for_prompt(req.attemptB.get('body', {}))}
-Response: {truncate_val_for_prompt(req.attemptB.get('response'))}
-"""
-
-    # Build intelligent fallback diff in case LLM is overloaded
-    status_a = str(req.attemptA.get('status', 'ERR'))
-    status_b = str(req.attemptB.get('status', 'ERR'))
-    url_a = req.attemptA.get('url', '')
-    url_b = req.attemptB.get('url', '')
-    dur_a = int(req.attemptA.get('duration') or 0)
-    dur_b = int(req.attemptB.get('duration') or 0)
+def _build_fallback_comparison(a: dict, b: dict) -> dict:
+    st_a, st_b = str(a.get("status", "ERR")), str(b.get("status", "ERR"))
+    dur_a, dur_b = int(a.get("duration") or 0), int(b.get("duration") or 0)
+    diff = dur_b - dur_a
 
     changes = []
-    if url_a != url_b:
-        changes.append({
-            "field": "URL Endpoint",
-            "attemptA": url_a,
-            "attemptB": url_b,
-            "impact": "Crucial: Fixed incorrect route path or endpoint typo."
-        })
-    if req.attemptA.get('method') != req.attemptB.get('method'):
-        changes.append({
-            "field": "HTTP Method",
-            "attemptA": str(req.attemptA.get('method')),
-            "attemptB": str(req.attemptB.get('method')),
-            "impact": "Adjusted HTTP method for the endpoint."
-        })
-    
-    diff_ms = dur_b - dur_a
-    time_insight = f"Attempt B was {abs(diff_ms)}ms {'faster' if diff_ms < 0 else 'slower'} than Attempt A."
-    
-    status_summary = f"Outcome transitioned from status {status_a} to {status_b}."
-    if status_a != "200" and status_b == "200":
-        status_summary = f"Resolution verified: Successfully fixed status {status_a} error to 200 OK."
+    if a.get("url") != b.get("url"):
+        changes.append({"field": "URL Endpoint", "attemptA": str(a.get("url")), "attemptB": str(b.get("url")), "impact": "Endpoint updated."})
+    if a.get("method") != b.get("method"):
+        changes.append({"field": "HTTP Method", "attemptA": str(a.get("method")), "attemptB": str(b.get("method")), "impact": "Method changed."})
 
-    explanation = f"In Attempt A, the request returned HTTP {status_a} on '{url_a}'. In Attempt B, the request was executed with '{url_b}' returning HTTP {status_b}. The key difference was resolving the endpoint configuration, resulting in a successful response payload."
-    
-    fallback_data = {
-        "statusComparison": {
-            "attemptAStatus": status_a,
-            "attemptBStatus": status_b,
-            "statusChanged": status_a != status_b,
-            "summary": status_summary
-        },
-        "timingComparison": {
-            "attemptADuration": dur_a,
-            "attemptBDuration": dur_b,
-            "differenceMs": diff_ms,
-            "insight": time_insight
-        },
+    return {
+        "statusComparison": {"attemptAStatus": st_a, "attemptBStatus": st_b, "statusChanged": st_a != st_b, "summary": f"Status changed from {st_a} to {st_b}."},
+        "timingComparison": {"attemptADuration": dur_a, "attemptBDuration": dur_b, "differenceMs": diff, "insight": f"Attempt B was {abs(diff)}ms {'faster' if diff < 0 else 'slower'}."},
         "detectedChanges": changes,
-        "aiExplanation": explanation
+        "aiExplanation": f"Attempt A returned status {st_a}, while Attempt B returned status {st_b} with updated parameters."
     }
+
+async def generate_history_comparison(req: CompareRequest) -> dict:
+    a, b = req.attemptA, req.attemptB
+    fallback = _build_fallback_comparison(a, b)
+
+    prompt = f"""Attempt A: {a.get('method')} {a.get('url')} -> Status {a.get('status')} ({a.get('duration')}ms)
+Headers: {json.dumps(a.get('headers') or {})} | Body: {json.dumps(a.get('body') or '')}
+Attempt B: {b.get('method')} {b.get('url')} -> Status {b.get('status')} ({b.get('duration')}ms)
+Headers: {json.dumps(b.get('headers') or {})} | Body: {json.dumps(b.get('body') or '')}"""
 
     try:
         content = await call_groq_with_fallback(
-            messages=[
-                {"role": "system", "content": COMPARE_SYSTEM_PROMPT},
-                {"role": "user", "content": user_prompt}
-            ],
-            temperature=0.2,
-            max_tokens=450,
-            is_json=True
+            [{"role": "system", "content": COMPARE_SYSTEM_PROMPT}, {"role": "user", "content": prompt}],
+            temperature=0.2, max_tokens=450, is_json=True
         )
         data = extract_json_from_llm(content)
-        if data and "aiExplanation" in data:
-            return {
-                "success": True,
-                "comparison": data
-            }
-        return {
-            "success": True,
-            "comparison": fallback_data
-        }
+        return {"success": True, "comparison": data if data and "aiExplanation" in data else fallback}
     except Exception as e:
-        logger.error(f"Error in history comparison: {str(e)}", exc_info=True)
-        return {
-            "success": True,
-            "comparison": fallback_data
-        }
+        logger.error(f"Comparison error: {e}")
+        return {"success": True, "comparison": fallback}
